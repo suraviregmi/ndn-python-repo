@@ -2,11 +2,11 @@ import asyncio as aio
 import filecmp
 import multiprocessing
 from ndn.app import NDNApp
-from ndn.encoding import Name, Component
+from ndn.encoding import Name, Component, ContentType
 from ndn.security import KeychainDigest
 from ndn.types import InterestNack, InterestTimeout
 from ndn_python_repo.clients import GetfileClient, PutfileClient, DeleteClient, CommandChecker, IngestClient
-from ndn_python_repo.command import RepoCommandParam, ObjParam, RepoStatCode, IngestCmdParam, EmbName
+from ndn_python_repo.command import RepoCommandParam, ObjParam, RepoStatCode, EmbName
 from ndn_python_repo.utils import PubSub
 import os
 import platform
@@ -157,19 +157,44 @@ class TestIngestSegmented(RepoTestSuite):
         await self.app.register(data_name, on_interest)
 
         # ingest a segmented object, letting end_block_id auto-detect from final_block_id
-        cmd_param = IngestCmdParam()
-        cmd_param.data_name = data_name
+        cmd_param = ObjParam()
+        cmd_param.name = data_name
         cmd_param.start_block_id = 0
         cmd_param.register_prefix = EmbName.from_name(data_name)
 
         int_name = Name.from_str(repo_name) + Name.from_str('ingest')
-        await self.app.express_interest(
-            int_name, cmd_param.encode(), must_be_fresh=False, can_be_prefix=False, lifetime=10000)
+        _, meta_info, _ = await self.app.express_interest(
+            int_name, cmd_param.encode(), must_be_fresh=True, can_be_prefix=False, lifetime=10000)
+        assert meta_info.content_type != ContentType.NACK
 
         # fetch each segment back from the repo and check content
         for seq, content in enumerate(segments):
             _, _, fetched_content = await self.app.express_interest(data_name + [Component.from_segment(seq)])
             assert bytes(fetched_content) == content
+
+        self.app.shutdown()
+
+
+class TestIngestNack(RepoTestSuite):
+    async def run(self):
+        await aio.sleep(2)  # wait for repo to startup
+        int_name = Name.from_str(repo_name) + Name.from_str('ingest')
+
+        # single Data packet that nobody serves: repo must NACK, not stay silent
+        cmd_param = ObjParam()
+        cmd_param.name = Name.from_str(uuid.uuid4().hex.upper()[0:6])
+        _, meta_info, _ = await self.app.express_interest(
+            int_name, cmd_param.encode(), must_be_fresh=True, can_be_prefix=False, lifetime=10000)
+        assert meta_info.content_type == ContentType.NACK
+
+        # segmented object with auto-detected end where no segment can be fetched:
+        # zero segments stored must not be acknowledged as success
+        cmd_param = ObjParam()
+        cmd_param.name = Name.from_str(uuid.uuid4().hex.upper()[0:6])
+        cmd_param.start_block_id = 0
+        _, meta_info, _ = await self.app.express_interest(
+            int_name, cmd_param.encode(), must_be_fresh=True, can_be_prefix=False, lifetime=10000)
+        assert meta_info.content_type == ContentType.NACK
 
         self.app.shutdown()
 

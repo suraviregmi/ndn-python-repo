@@ -12,9 +12,9 @@ sys.path.insert(1, os.path.join(sys.path[0], '..'))
 import asyncio as aio
 import logging
 from ndn.app import NDNApp
-from ndn.encoding import Name, NonStrictName, Links
+from ndn.encoding import Name, NonStrictName, Links, ContentType
 from ndn.types import InterestNack, InterestTimeout
-from ..command import IngestCmdParam, EmbName
+from ..command import ObjParam, EmbName
 from typing import Optional
 
 
@@ -59,7 +59,8 @@ class IngestClient(object):
         :param forwarding_hint: NonStrictName. The forwarding hint the repo uses when fetching data.
         :param register_prefix: NonStrictName. If given, the repo starts serving reads under this\
             prefix once the data is stored.
-        :return: True if the repo acknowledged the ingest command.
+        :return: True if the repo acknowledged the ingest command, False if every attempt\
+            was NACKed by the repo or timed out.
         """
         data_name = Name.normalize(data_name)
         self.encoded_packets[Name.to_str(data_name)] = self.app.prepare_data(
@@ -71,8 +72,8 @@ class IngestClient(object):
         else:
             await self.app.register(data_name, self._on_interest)
 
-        cmd_param = IngestCmdParam()
-        cmd_param.data_name = data_name
+        cmd_param = ObjParam()
+        cmd_param.name = data_name
         if forwarding_hint is not None:
             cmd_param.forwarding_hint = Links()
             cmd_param.forwarding_hint.names = [forwarding_hint]
@@ -84,8 +85,14 @@ class IngestClient(object):
         n_retries = 3
         while n_retries > 0:
             try:
-                await self.app.express_interest(
-                    int_name, cmd_param.encode(), must_be_fresh=False, can_be_prefix=False, lifetime=10000)
+                # must_be_fresh so that a retry is not answered by a cached NACK
+                _, meta_info, _ = await self.app.express_interest(
+                    int_name, cmd_param.encode(), must_be_fresh=True, can_be_prefix=False, lifetime=10000)
+                if meta_info is not None and meta_info.content_type == ContentType.NACK:
+                    self.logger.info(f'Ingest of {Name.to_str(data_name)} rejected by repo')
+                    n_retries -= 1
+                    await aio.sleep(1)
+                    continue
                 self.logger.info(f'Ingest of {Name.to_str(data_name)} acknowledged by repo')
                 return True
             except InterestNack as e:
