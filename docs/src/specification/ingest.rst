@@ -9,10 +9,11 @@ for Interests directly, and each command is a single Interest/Data exchange.
 
 1. The repo registers an Interest filter on ``/<repo_name>/ingest``.
 
-2. The producer sends an Interest under ``/<repo_name>/ingest`` carrying an ``ObjParam``
-   as its application parameters. NDN appends a ``params-sha256=<digest>`` component computed
-   over the parameter, so the Interest name reflects its command parameters, with the
-   following fields:
+2. The producer sends a signed Interest under ``/<repo_name>/ingest`` carrying an ``ObjParam``
+   as its application parameters. The InterestSignatureInfo must contain ``SignatureTime``
+   and ``SignatureNonce``. Since the ``params-sha256=<digest>`` name component covers both the
+   parameters and the signature, every command Interest has a distinct name, even when it
+   carries the same parameters as an earlier one. ``ObjParam`` has the following fields:
 
    * ``name``: either a Data packet name, or a name prefix of segmented Data packets.
    * ``forwarding_hint`` (Optional): forwarding hint used to fetch ``name``, same
@@ -24,23 +25,16 @@ for Interests directly, and each command is a single Interest/Data exchange.
 
    See :doc:`encoding` for the ``ObjParam`` ABNF and TLV-TYPE assignments.
 
-3. The repo fetches and stores Data following the same rules as :doc:`insert`:
-
-   * If neither block id is given, the repo fetches the single packet identified by
-     ``name``.
-   * If only ``end_block_id`` is given, ``start_block_id`` is considered 0.
-   * If only ``start_block_id`` is given, ``end_block_id`` is auto-detected, i.e. infinity.
-   * If both are given, the command is valid only when ``end_block_id >= start_block_id``.
-   * Segment numbers follow `NDN naming conventions rev3
-     <https://named-data.net/publications/techreports/ndn-tr-22-3-ndn-memo-naming-conventions/>`_.
+3. The repo fetches and stores Data as in step 3 of :doc:`insert`.
 
 4. Once all requested packets are fetched and stored, the repo acks by replying to the
    original ingest Interest with an empty Data packet.
 
 5. If the command fails, the repo replies to the original ingest Interest with an empty
-   Data packet whose ``ContentType`` is ``NACK``. The producer may resend the command to
-   retry. There is no status/check protocol for ingest (contrast with :doc:`check`, available
-   for :doc:`insert` and :doc:`delete`).
+   Data packet whose ``ContentType`` is ``NACK``. The producer may retry by sending the
+   command again as a new signed Interest, which has a new name. There is no status/check
+   protocol for ingest (contrast with :doc:`check`, available for :doc:`insert` and
+   :doc:`delete`).
 
 The repo must reply before the ingest Interest expires, so fetching is bounded by its
 ``InterestLifetime``; if fetching does not finish in time, the repo replies with a NACK.
@@ -50,3 +44,4 @@ Ingest commands are idempotent, so resending a command is safe.
    ``register_prefix`` registrations are kept only in memory, not persisted like
    :doc:`insert`, and are lost on repo restart. Also, unlike :doc:`insert`, the repo does not
    check whether ``name`` overlaps with its own ``/<repo_name>`` namespace.
+   The repo does not yet validate the command Interest's signature against a trust schema.

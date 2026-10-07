@@ -6,9 +6,10 @@
 # to the same Interest with an empty Data packet as acknowledgement, or with
 # an application-level NACK if the command failed.
 #
-# NDN appends a params-sha256 digest of the command parameters to the
-# Interest name, so commands with different parameters are disambiguated
-# at the PIT level without any extra state.
+# The ingest Interest is a signed Interest carrying SignatureTime and
+# SignatureNonce. Its params-sha256 name component covers the parameters and
+# the signature, so every command (including a resend) has a distinct name
+# and each reply answers exactly one Interest name.
 #
 # @Author regmisuravi@gmail.com
 # @Date   2026-06-30
@@ -32,7 +33,7 @@ class DirectIngestHandle:
     Repo-side handler for the direct ingest protocol.
     Listens on <repo_name>/ingest, and processes each command as a single Interest/Data
 
-    1. Producer sends an Interest to <repo_name>/ingest/params-sha256=<digest>,
+    1. Producer sends a signed Interest to <repo_name>/ingest/params-sha256=<digest>,
        with AppParam = ObjParam { name, forwarding_hint, ... }.
     2. Repo fetches data_name from the producer, using forwarding_hint if given.
     3. Repo stores the fetched Data.

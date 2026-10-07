@@ -3,7 +3,7 @@ import filecmp
 import multiprocessing
 from ndn.app import NDNApp
 from ndn.encoding import Name, Component, ContentType
-from ndn.security import KeychainDigest
+from ndn.security import KeychainDigest, DigestSha256Signer
 from ndn.types import InterestNack, InterestTimeout
 from ndn_python_repo.clients import GetfileClient, PutfileClient, DeleteClient, CommandChecker, IngestClient
 from ndn_python_repo.command import RepoCommandParam, ObjParam, RepoStatCode, EmbName
@@ -164,7 +164,8 @@ class TestIngestSegmented(RepoTestSuite):
 
         int_name = Name.from_str(repo_name) + Name.from_str('ingest')
         _, meta_info, _ = await self.app.express_interest(
-            int_name, cmd_param.encode(), must_be_fresh=True, can_be_prefix=False, lifetime=10000)
+            int_name, cmd_param.encode(), can_be_prefix=False, lifetime=10000,
+            signer=DigestSha256Signer(for_interest=True))
         assert meta_info.content_type != ContentType.NACK
 
         # fetch each segment back from the repo and check content
@@ -183,9 +184,17 @@ class TestIngestNack(RepoTestSuite):
         # single Data packet that nobody serves: repo must NACK, not stay silent
         cmd_param = ObjParam()
         cmd_param.name = Name.from_str(uuid.uuid4().hex.upper()[0:6])
-        _, meta_info, _ = await self.app.express_interest(
-            int_name, cmd_param.encode(), must_be_fresh=True, can_be_prefix=False, lifetime=10000)
+        nack_name, meta_info, _ = await self.app.express_interest(
+            int_name, cmd_param.encode(), can_be_prefix=False, lifetime=10000,
+            signer=DigestSha256Signer(for_interest=True))
         assert meta_info.content_type == ContentType.NACK
+
+        # resending the same command is a new signed Interest with a new name
+        retry_name, meta_info, _ = await self.app.express_interest(
+            int_name, cmd_param.encode(), can_be_prefix=False, lifetime=10000,
+            signer=DigestSha256Signer(for_interest=True))
+        assert meta_info.content_type == ContentType.NACK
+        assert retry_name != nack_name
 
         # segmented object with auto-detected end where no segment can be fetched:
         # zero segments stored must not be acknowledged as success
@@ -193,7 +202,8 @@ class TestIngestNack(RepoTestSuite):
         cmd_param.name = Name.from_str(uuid.uuid4().hex.upper()[0:6])
         cmd_param.start_block_id = 0
         _, meta_info, _ = await self.app.express_interest(
-            int_name, cmd_param.encode(), must_be_fresh=True, can_be_prefix=False, lifetime=10000)
+            int_name, cmd_param.encode(), can_be_prefix=False, lifetime=10000,
+            signer=DigestSha256Signer(for_interest=True))
         assert meta_info.content_type == ContentType.NACK
 
         self.app.shutdown()

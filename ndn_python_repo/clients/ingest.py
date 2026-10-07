@@ -13,6 +13,7 @@ import asyncio as aio
 import logging
 from ndn.app import NDNApp
 from ndn.encoding import Name, NonStrictName, Links, ContentType
+from ndn.security import DigestSha256Signer
 from ndn.types import InterestNack, InterestTimeout
 from ..command import ObjParam, EmbName
 from typing import Optional
@@ -85,13 +86,14 @@ class IngestClient(object):
         n_retries = 3
         while n_retries > 0:
             try:
-                # must_be_fresh so that a retry is not answered by a cached NACK
+                # Each attempt is a new signed Interest: SignatureTime and SignatureNonce are
+                # covered by params-sha256, so a resend never reuses a name the repo replied to.
                 _, meta_info, _ = await self.app.express_interest(
-                    int_name, cmd_param.encode(), must_be_fresh=True, can_be_prefix=False, lifetime=10000)
+                    int_name, cmd_param.encode(), can_be_prefix=False, lifetime=10000,
+                    signer=DigestSha256Signer(for_interest=True))
                 if meta_info is not None and meta_info.content_type == ContentType.NACK:
                     self.logger.info(f'Ingest of {Name.to_str(data_name)} rejected by repo')
                     n_retries -= 1
-                    await aio.sleep(1)
                     continue
                 self.logger.info(f'Ingest of {Name.to_str(data_name)} acknowledged by repo')
                 return True
