@@ -22,11 +22,11 @@ import logging
 import os
 from pathlib import Path
 
-from ndn.app import NDNApp
+from ndn.app import NDNApp, ReplyFunc, Validator, ValidResult
 from ndn.app_support.light_versec import Checker, LvsModel, TypeNumber, compile_lvs, lvs_validator
-from ndn.encoding import Name, NonStrictName, ContentType
+from ndn.encoding import Name, NonStrictName, ContentType, tlv_parse
+from ndn.security import Keychain
 from ndn.security.validator.cascade_validator import MemoryKeyStorage
-from ndn.types import Validator
 from .read_handle import ReadHandle
 from .utils import fetch_object
 from ..command import ObjParam, RepoStatCode
@@ -86,7 +86,7 @@ class DirectIngestHandle:
     REPLY_MARGIN_MS = 500  # reply this long before the ingest Interest expires
 
     def __init__(self, app: NDNApp, storage: Storage, config: dict, read_handle: ReadHandle,
-                 interest_validator: Optional[Validator] = None):
+                 interest_validator: Optional[Validator] = None, keychain: Optional[Keychain] = None):
         self.app     = app
         self.storage = storage
         self.config  = config
@@ -95,7 +95,11 @@ class DirectIngestHandle:
         self.m_read_handle = read_handle
         self.interest_validator = interest_validator
         # Replies are signed with the repo's default key, so the producer can validate them
-        self.signer = app.keychain.get_signer({}) if interest_validator is not None else None
+        self.signer = None
+        if interest_validator is not None:
+            if keychain is None:
+                keychain = NDNApp.default_keychain()
+            self.signer = keychain.get_signer({})
 
     async def listen(self, prefix: NonStrictName):
         """
@@ -110,45 +114,52 @@ class DirectIngestHandle:
 
         self.prefix   = Name.normalize(prefix)
         ingest_prefix = self.prefix + Name.from_str('ingest')
-        await self.app.register(
-            ingest_prefix,
-            self._on_insert_interest,
-            validator=self.interest_validator,
-            need_sig_ptrs=True,
-        )
+        self.app.attach_handler(ingest_prefix, self._on_insert_interest, self._validate_command)
+        await self.app.register(ingest_prefix)
         logging.info(f'DirectIngestHandle listening on {Name.to_str(ingest_prefix)}')
+
+    async def _validate_command(self, name, sig_ptrs, context) -> ValidResult:
+        """
+        Validate ingest command Interests with ``interest_validator``.
+        Unsigned commands bypass it, so that ``_on_insert_interest`` answers them with a NACK
+        instead of letting the producer time out.
+        """
+        if sig_ptrs.signature_info is None:
+            return ValidResult.ALLOW_BYPASS
+        return await self.interest_validator(name, sig_ptrs, context)
 
     # Ingest Interest entry point.
 
-    def _on_insert_interest(self, int_name, int_param, app_param, sig_ptrs=None):
+    def _on_insert_interest(self, int_name, app_param, reply: ReplyFunc, context):
         """
         Check the command, and start fetching only if it is well-formed.
         Rejected commands are answered here, without creating a task.
         """
+        sig_ptrs = context['sig_ptrs']
         if sig_ptrs is None or sig_ptrs.signature_info is None:
             logging.warning(f'ingest.reject.unsigned {Name.to_str(int_name)}')
-            self._reply_nack(int_name)
+            self._reply_nack(int_name, reply)
             return
         if sig_ptrs.signature_info.signature_time is None:
             logging.warning(f'ingest.reject.missing_sig_time {Name.to_str(int_name)}')
-            self._reply_nack(int_name)
+            self._reply_nack(int_name, reply)
             return
         if sig_ptrs.signature_info.signature_nonce is None:
             logging.warning(f'ingest.reject.missing_sig_nonce {Name.to_str(int_name)}')
-            self._reply_nack(int_name)
+            self._reply_nack(int_name, reply)
             return
 
         try:
-            param = ObjParam.parse(app_param)
+            param = tlv_parse(ObjParam, app_param)
         except Exception as e:
             logging.warning(f'ingest.parse.fail: {e}')
-            self._reply_nack(int_name)
+            self._reply_nack(int_name, reply)
             return
 
         logging.info(f'ingest.received {Name.to_str(int_name)}')
-        aio.create_task(self._process_insert(int_name, int_param, param))
+        aio.create_task(self._process_insert(int_name, context['int_param'], param, reply))
 
-    async def _process_insert(self, int_name, int_param, param: ObjParam):
+    async def _process_insert(self, int_name, int_param, param: ObjParam, reply: ReplyFunc):
         """
         Fetch and store the requested Data, then reply to int_name with an empty
         Data packet as acknowledgement, or with an application-level NACK
@@ -164,17 +175,17 @@ class DirectIngestHandle:
                 fetch_object(self.app, self.storage, param), timeout=deadline_s)
         except aio.TimeoutError:
             logging.error(f'ingest.fetch.deadline {Name.to_str(int_name)} deadline={deadline_s}s')
-            self._reply_nack(int_name)
+            self._reply_nack(int_name, reply)
             return
 
         if status_code == RepoStatCode.MALFORMED:
             logging.warning(f'ingest.malformed {Name.to_str(int_name)}')
-            self._reply_nack(int_name)
+            self._reply_nack(int_name, reply)
             return
         data_name = Name.to_str(param.name)
         if status_code != RepoStatCode.COMPLETED:
             logging.error(f'ingest.fetch.fail {data_name} inserted={insert_num}')
-            self._reply_nack(int_name)
+            self._reply_nack(int_name, reply)
             return
 
         logging.info(f'ingest.data.saved {data_name} count={insert_num}')
@@ -188,13 +199,13 @@ class DirectIngestHandle:
                 logging.info(f'ingest.prefix.registered {prefix_str}')
 
         # Ack
-        self.app.put_data(int_name, None, signer=self.signer)
+        reply(self.app.make_data(int_name, None, self.signer))
         logging.info(f'ingest.ack.sent data={data_name}')
 
-    def _reply_nack(self, int_name):
+    def _reply_nack(self, int_name, reply: ReplyFunc):
         """
         Reply to the ingest Interest with an application-level NACK, so the
         producer learns about the failure without waiting for its Interest to time out.
         """
-        self.app.put_data(int_name, None, content_type=ContentType.NACK, signer=self.signer)
+        reply(self.app.make_data(int_name, None, self.signer, content_type=ContentType.NACK))
         logging.info(f'ingest.nack.sent {Name.to_str(int_name)}')
