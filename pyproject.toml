@@ -34,7 +34,7 @@ include = [
 
 [tool.poetry.dependencies]
 python = "^3.11"
-python-ndn = "^0.5.1"
+python-ndn = { git = "https://github.com/named-data/python-ndn.git", rev = "150eb16681e324f0e17110eb6fb276d034a5916f" }
 pyyaml = "^6.0"
 setuptools = ">=75,<79"
 
